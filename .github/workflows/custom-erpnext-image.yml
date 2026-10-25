@@ -4,7 +4,9 @@ name: Custom / Build ERPNext Etsy Image
 # v16.x.y release, pushes it to Docker Hub and commits the new pin to apps.json.
 # Deploying (switching the image tag and running `bench migrate`) stays manual.
 #
-# Required repository secrets: DOCKERHUB_USERNAME, DOCKERHUB_TOKEN (a Docker Hub access token).
+# Required repository secrets: DOCKERHUB_USERNAME, DOCKERHUB_TOKEN (a Docker Hub access token),
+# and for the success email MAIL_USERNAME (Gmail address), MAIL_PASSWORD (Gmail app password)
+# and MAIL_TO (recipient).
 
 on:
   schedule:
@@ -148,12 +150,15 @@ jobs:
           PY
 
       - name: Push image
+        id: push
         if: ${{ steps.check.outputs.build == 'true' }}
         env:
           REF: ${{ env.IMAGE }}:${{ steps.version.outputs.image_tag }}
         run: |
           docker push "$REF"
           docker push "$IMAGE:latest"
+          digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$REF" | cut -d@ -f2)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       - name: Commit apps.json
         if: ${{ steps.check.outputs.build == 'true' }}
@@ -170,3 +175,33 @@ jobs:
           git commit -m "Bump ERPNext to $TAG"
           git pull --rebase
           git push
+
+      - name: Email build summary
+        if: ${{ steps.check.outputs.build == 'true' }}
+        uses: dawidd6/action-send-mail@v23
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          to: ${{ secrets.MAIL_TO }}
+          from: ERPNext image builder <${{ secrets.MAIL_USERNAME }}>
+          subject: "New image built: ${{ env.IMAGE }}:${{ steps.version.outputs.image_tag }}"
+          body: |
+            A new ERPNext image was built, smoke-tested and pushed to Docker Hub.
+
+            Image:   ${{ env.IMAGE }}:${{ steps.version.outputs.image_tag }}  (also tagged :latest)
+            ERPNext: ${{ steps.version.outputs.tag }}
+            Digest:  ${{ steps.push.outputs.digest }}
+
+            Docker Hub:      https://hub.docker.com/r/${{ env.IMAGE }}/tags?name=${{ steps.version.outputs.image_tag }}
+            ERPNext release: https://github.com/frappe/erpnext/releases/tag/${{ steps.version.outputs.tag }}
+            Workflow run:    ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            apps.json:       ${{ github.server_url }}/${{ github.repository }}/blob/main/apps.json
+
+            To deploy when ready:
+              1. Back up:  bench --site frontend backup
+              2. Set image: ${{ env.IMAGE }}:${{ steps.version.outputs.image_tag }} in your compose file
+              3. docker compose pull && docker compose up -d
+              4. In the backend container: bench --site frontend migrate
