@@ -1,0 +1,172 @@
+name: Custom / Build ERPNext Etsy Image
+
+# Builds haashimrehan/erpnext-custom from apps.json whenever ERPNext publishes a new
+# v16.x.y release, pushes it to Docker Hub and commits the new pin to apps.json.
+# Deploying (switching the image tag and running `bench migrate`) stays manual.
+#
+# Required repository secrets: DOCKERHUB_USERNAME, DOCKERHUB_TOKEN (a Docker Hub access token).
+
+on:
+  schedule:
+    # Every day at 06:30 UTC
+    - cron: "30 6 * * *"
+
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Rebuild even if the image tag already exists (e.g. after an erpnext-etsy change)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: custom-erpnext-image
+  cancel-in-progress: false
+
+env:
+  IMAGE: haashimrehan/erpnext-custom
+
+jobs:
+  build:
+    if: ${{ github.repository == 'haashimrehan/frappe_docker' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Find latest ERPNext v16 release
+        id: version
+        run: |
+          tag=$(git ls-remote --tags --refs https://github.com/frappe/erpnext 'v16.*' \
+            | awk -F/ '{print $3}' \
+            | grep -E '^v16\.[0-9]+\.[0-9]+$' \
+            | sort -V | tail -n1)
+          test -n "$tag"
+          echo "Latest ERPNext release: $tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "image_tag=$tag-etsy" >> "$GITHUB_OUTPUT"
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Check whether the image already exists
+        id: check
+        env:
+          REF: ${{ env.IMAGE }}:${{ steps.version.outputs.image_tag }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          if [ "$FORCE" != "true" ] && docker manifest inspect "$REF" > /dev/null 2>&1; then
+            echo "$REF already exists, nothing to build"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Pin ERPNext version in apps.json
+        if: ${{ steps.check.outputs.build == 'true' }}
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          sed -i -E "s#(\"url\": \"https://github.com/frappe/erpnext\", \"branch\": \")[^\"]+#\1${TAG}#" apps.json
+          grep -q "\"branch\": \"${TAG}\"" apps.json
+          cat apps.json
+
+      - name: Free disk space
+        if: ${{ steps.check.outputs.build == 'true' }}
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Setup Buildx
+        if: ${{ steps.check.outputs.build == 'true' }}
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build image
+        if: ${{ steps.check.outputs.build == 'true' }}
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: images/custom/Containerfile
+          build-args: |
+            FRAPPE_PATH=https://github.com/frappe/frappe
+            FRAPPE_BRANCH=version-16
+            CACHE_BUST=${{ github.run_id }}
+          secret-files: |
+            apps_json=apps.json
+          load: true
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.version.outputs.image_tag }}
+            ${{ env.IMAGE }}:latest
+
+      - name: Smoke test image
+        if: ${{ steps.check.outputs.build == 'true' }}
+        env:
+          REF: ${{ env.IMAGE }}:${{ steps.version.outputs.image_tag }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          docker run --rm -i -e TAG --entrypoint python3 "$REF" - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          apps_dir = Path("/home/frappe/frappe-bench/apps")
+          apps = sorted(p.name for p in apps_dir.iterdir() if p.is_dir())
+          print("apps:", ", ".join(apps))
+          missing = {"frappe", "erpnext", "hrms", "etsy"} - set(apps)
+          assert not missing, f"missing apps: {missing}"
+
+          init = (apps_dir / "erpnext/erpnext/__init__.py").read_text()
+          version = re.search(r'__version__ = "([^"]+)"', init).group(1)
+          expected = os.environ["TAG"].removeprefix("v")
+          assert version == expected, f"erpnext is {version}, expected {expected}"
+          print("erpnext version:", version)
+
+          # Every dotted patch module in our own apps' patches.txt must exist, or `bench migrate`
+          # fails. Frappe's apps are skipped: they keep entries for long-deleted patches that
+          # existing sites have already run.
+          broken = []
+          for app in ["etsy"]:
+              patches = apps_dir / app / app / "patches.txt"
+              if not patches.exists():
+                  continue
+              for line in patches.read_text().splitlines():
+                  entry = line.split("#", 1)[0].strip()
+                  if not entry or entry.startswith(("[", "execute:")) or entry.endswith(":"):
+                      continue
+                  base = apps_dir / app / Path(*entry.split("."))
+                  if not (base.with_suffix(".py").exists() or (base / "__init__.py").exists()):
+                      broken.append(f"{app}: {entry}")
+          assert not broken, "patches.txt entries with no module:\n  " + "\n  ".join(broken)
+          print("patches.txt entries all resolve")
+          PY
+
+      - name: Push image
+        if: ${{ steps.check.outputs.build == 'true' }}
+        env:
+          REF: ${{ env.IMAGE }}:${{ steps.version.outputs.image_tag }}
+        run: |
+          docker push "$REF"
+          docker push "$IMAGE:latest"
+
+      - name: Commit apps.json
+        if: ${{ steps.check.outputs.build == 'true' }}
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps.json
+          if git diff --cached --quiet; then
+            echo "apps.json already pins $TAG"
+            exit 0
+          fi
+          git commit -m "Bump ERPNext to $TAG"
+          git pull --rebase
+          git push
