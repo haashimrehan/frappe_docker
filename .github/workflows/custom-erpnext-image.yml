@@ -1,7 +1,9 @@
 name: Custom / Build ERPNext Etsy Image
 
 # Builds haashimrehan/erpnext-custom from apps.json whenever ERPNext publishes a new
-# v16.x.y release, pushes it to Docker Hub and commits the new pin to apps.json.
+# v16.x.y release or erpnext-etsy gets a new commit, pushes it to Docker Hub and commits
+# the new ERPNext pin to apps.json. Every build gets its own tag, e.g. v16.52.1-etsy-a91df2e,
+# so a server can never keep running an old image under a reused tag.
 # Deploying (switching the image tag and running `bench migrate`) stays manual.
 #
 # Required repository secrets: DOCKERHUB_USERNAME, DOCKERHUB_TOKEN (a Docker Hub access token),
@@ -16,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       force:
-        description: "Rebuild even if the image tag already exists (e.g. after an erpnext-etsy change)"
+        description: "Rebuild even if nothing changed (the tag gets a -b<run number> suffix)"
         type: boolean
         default: false
 
@@ -49,8 +51,17 @@ jobs:
             | sort -V | tail -n1)
           test -n "$tag"
           echo "Latest ERPNext release: $tag"
+
+          # The erpnext-etsy commit the build will clone, so the tag says which code is inside
+          etsy_url=$(jq -r '.[] | select(.url | endswith("/erpnext-etsy")) | .url' apps.json)
+          etsy_branch=$(jq -r '.[] | select(.url | endswith("/erpnext-etsy")) | .branch' apps.json)
+          etsy_sha=$(git ls-remote "$etsy_url" "refs/heads/$etsy_branch" | cut -f1)
+          test -n "$etsy_sha"
+          echo "erpnext-etsy $etsy_branch is at $etsy_sha"
+
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "image_tag=$tag-etsy" >> "$GITHUB_OUTPUT"
+          echo "etsy_sha=$etsy_sha" >> "$GITHUB_OUTPUT"
+          echo "image_tag=$tag-etsy-${etsy_sha:0:7}" >> "$GITHUB_OUTPUT"
 
       - name: Login to Docker Hub
         uses: docker/login-action@v4.6.0
@@ -61,15 +72,22 @@ jobs:
       - name: Check whether the image already exists
         id: check
         env:
-          REF: ${{ env.IMAGE }}:${{ steps.version.outputs.image_tag }}
+          IMAGE_TAG: ${{ steps.version.outputs.image_tag }}
           FORCE: ${{ inputs.force }}
+          RUN: ${{ github.run_number }}
         run: |
-          if [ "$FORCE" != "true" ] && docker manifest inspect "$REF" > /dev/null 2>&1; then
-            echo "$REF already exists, nothing to build"
-            echo "build=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "build=true" >> "$GITHUB_OUTPUT"
+          if docker manifest inspect "$IMAGE:$IMAGE_TAG" > /dev/null 2>&1; then
+            if [ "$FORCE" != "true" ]; then
+              echo "$IMAGE:$IMAGE_TAG already exists, nothing to build"
+              echo "build=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            # Never overwrite a tag a server may already run
+            IMAGE_TAG="$IMAGE_TAG-b$RUN"
           fi
+          echo "Building $IMAGE:$IMAGE_TAG"
+          echo "build=true" >> "$GITHUB_OUTPUT"
+          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Pin ERPNext version in apps.json
         if: ${{ steps.check.outputs.build == 'true' }}
@@ -104,13 +122,16 @@ jobs:
             apps_json=apps.json
           load: true
           tags: |
-            ${{ env.IMAGE }}:${{ steps.version.outputs.image_tag }}
+            ${{ env.IMAGE }}:${{ steps.check.outputs.image_tag }}
             ${{ env.IMAGE }}:latest
+          labels: |
+            org.opencontainers.image.version=${{ steps.check.outputs.image_tag }}
+            com.italkrobot.erpnext-etsy.commit=${{ steps.version.outputs.etsy_sha }}
 
       - name: Smoke test image
         if: ${{ steps.check.outputs.build == 'true' }}
         env:
-          REF: ${{ env.IMAGE }}:${{ steps.version.outputs.image_tag }}
+          REF: ${{ env.IMAGE }}:${{ steps.check.outputs.image_tag }}
           TAG: ${{ steps.version.outputs.tag }}
         run: |
           docker run --rm -i -e TAG --entrypoint python3 "$REF" - <<'PY'
@@ -153,7 +174,7 @@ jobs:
         id: push
         if: ${{ steps.check.outputs.build == 'true' }}
         env:
-          REF: ${{ env.IMAGE }}:${{ steps.version.outputs.image_tag }}
+          REF: ${{ env.IMAGE }}:${{ steps.check.outputs.image_tag }}
         run: |
           docker push "$REF"
           docker push "$IMAGE:latest"
@@ -187,21 +208,23 @@ jobs:
           password: ${{ secrets.MAIL_PASSWORD }}
           to: ${{ secrets.MAIL_TO }}
           from: ERPNext image builder <${{ secrets.MAIL_USERNAME }}>
-          subject: "New image built: ${{ env.IMAGE }}:${{ steps.version.outputs.image_tag }}"
+          subject: "New image built: ${{ env.IMAGE }}:${{ steps.check.outputs.image_tag }}"
           body: |
             A new ERPNext image was built, smoke-tested and pushed to Docker Hub.
 
-            Image:   ${{ env.IMAGE }}:${{ steps.version.outputs.image_tag }}  (also tagged :latest)
+            Image:   ${{ env.IMAGE }}:${{ steps.check.outputs.image_tag }}  (also tagged :latest)
             ERPNext: ${{ steps.version.outputs.tag }}
+            Etsy app: https://github.com/haashimrehan/erpnext-etsy/commit/${{ steps.version.outputs.etsy_sha }}
             Digest:  ${{ steps.push.outputs.digest }}
 
-            Docker Hub:      https://hub.docker.com/r/${{ env.IMAGE }}/tags?name=${{ steps.version.outputs.image_tag }}
+            Docker Hub:      https://hub.docker.com/r/${{ env.IMAGE }}/tags?name=${{ steps.check.outputs.image_tag }}
             ERPNext release: https://github.com/frappe/erpnext/releases/tag/${{ steps.version.outputs.tag }}
             Workflow run:    ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
             apps.json:       ${{ github.server_url }}/${{ github.repository }}/blob/main/apps.json
 
             To deploy when ready:
               1. Back up:  bench --site frontend backup
-              2. Set image: ${{ env.IMAGE }}:${{ steps.version.outputs.image_tag }} in your compose file
-              3. docker compose pull && docker compose up -d
-              4. In the backend container: bench --site frontend migrate
+              2. Set the image tag to ${{ steps.check.outputs.image_tag }} in the app / compose file
+                 and redeploy (a new tag makes the server pull the new image)
+              3. In the backend container: bench --site all migrate
+                 (migrate also clears the cache; otherwise run: bench --site all clear-cache)
