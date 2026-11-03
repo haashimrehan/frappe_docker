@@ -91,7 +91,9 @@ RUN useradd -u 1000 -g 0 -d /home/frappe -ms /bin/bash frappe \
     && chmod 644 /templates/nginx/frappe.conf.template
 
 
-FROM base AS builder
+# Build dependencies in their own stage so CI can cache them (they rarely change);
+# the app install below is rebuilt on every build on purpose (CACHE_BUST).
+FROM base AS build-deps
 
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
@@ -123,6 +125,8 @@ RUN apt-get update \
     build-essential \
     libbz2-dev \
     && rm -rf /var/lib/apt/lists/*
+
+FROM build-deps AS builder
 
 USER frappe
 

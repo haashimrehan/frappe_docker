@@ -134,12 +134,32 @@ jobs:
       - name: Free disk space
         if: ${{ steps.check.outputs.build == 'true' }}
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          # Deleting these takes 1-1.5 min; current runners already have ~85 GB free, so only
+          # clean up when space is actually short (the build needs roughly 15 GB).
+          avail_gb=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
+          if [ "$avail_gb" -lt 40 ]; then
+            echo "Only ${avail_gb} GB free, cleaning up"
+            sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          fi
           df -h /
 
       - name: Setup Buildx
         if: ${{ steps.check.outputs.build == 'true' }}
         uses: docker/setup-buildx-action@v4
+
+      # Cache only the slow-changing layers (OS packages, Node, wkhtmltopdf, build dependencies)
+      # in the GitHub Actions cache. The app install is rebuilt on every build on purpose, and
+      # exporting it to the cache would cost more time than it saves.
+      - name: Warm base layer cache
+        if: ${{ steps.check.outputs.build == 'true' }}
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: images/custom/Containerfile
+          target: build-deps
+          outputs: type=cacheonly
+          cache-from: type=gha,scope=erpnext-build-deps
+          cache-to: type=gha,scope=erpnext-build-deps,mode=max
 
       - name: Build image
         if: ${{ steps.check.outputs.build == 'true' }}
@@ -155,6 +175,7 @@ jobs:
             apps_json=apps.json
           secrets: |
             git_token=${{ secrets.TBCI_CUSTOMIZATION_TOKEN }}
+          cache-from: type=gha,scope=erpnext-build-deps
           load: true
           tags: |
             ${{ env.IMAGE }}:${{ steps.check.outputs.image_tag }}
