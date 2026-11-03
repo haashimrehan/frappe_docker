@@ -303,5 +303,7 @@ jobs:
                  and redeploy (a new tag makes the server pull the new image)
               3. In the backend container: bench --site all migrate
                  (migrate also clears the cache; otherwise run: bench --site all clear-cache)
-                 A newly added app must be installed once first, e.g.:
-                 bench --site frontend install-app tbci_customization
+                 A newly added app must be installed once first. Its name has to be in
+                 sites/apps.txt (on the sites volume, so a new image doesn't update it):
+                 grep -qx <app> sites/apps.txt || echo <app> >> sites/apps.txt
+                 bench --site frontend install-app <app>
