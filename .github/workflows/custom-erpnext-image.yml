@@ -74,7 +74,9 @@ jobs:
           TBCI_TOKEN=$(printf '%s' "$TBCI_TOKEN" | tr -d '[:space:]')
           tbci_url=$(jq -r '.[] | select(.url | endswith("/tbci_customization")) | .url' apps.json)
           tbci_branch=$(jq -r '.[] | select(.url | endswith("/tbci_customization")) | .branch' apps.json)
-          tbci_sha=$(git -c "url.https://x-access-token:${TBCI_TOKEN}@github.com/haashimrehan/tbci_customization.insteadOf=https://github.com/haashimrehan/tbci_customization" \
+          # Run outside the checkout: actions/checkout sets an Authorization extraheader for github.com
+          # in the repo's git config (this repo's GITHUB_TOKEN), which would override the token.
+          tbci_sha=$(cd "$RUNNER_TEMP" && git -c "url.https://x-access-token:${TBCI_TOKEN}@github.com/haashimrehan/tbci_customization.insteadOf=https://github.com/haashimrehan/tbci_customization" \
             ls-remote "$tbci_url" "refs/heads/$tbci_branch" | cut -f1) || true
           if [ -z "$tbci_sha" ]; then
             # Diagnose without printing the token
