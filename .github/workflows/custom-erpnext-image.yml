@@ -69,11 +69,24 @@ jobs:
             echo "::error::Secret TBCI_CUSTOMIZATION_TOKEN is missing (read access to haashimrehan/tbci_customization)"
             exit 1
           fi
+          # A pasted secret can carry a trailing newline or spaces
+          raw_len=${#TBCI_TOKEN}
+          TBCI_TOKEN=$(printf '%s' "$TBCI_TOKEN" | tr -d '[:space:]')
           tbci_url=$(jq -r '.[] | select(.url | endswith("/tbci_customization")) | .url' apps.json)
           tbci_branch=$(jq -r '.[] | select(.url | endswith("/tbci_customization")) | .branch' apps.json)
           tbci_sha=$(git -c "url.https://x-access-token:${TBCI_TOKEN}@github.com/haashimrehan/tbci_customization.insteadOf=https://github.com/haashimrehan/tbci_customization" \
-            ls-remote "$tbci_url" "refs/heads/$tbci_branch" | cut -f1)
-          test -n "$tbci_sha"
+            ls-remote "$tbci_url" "refs/heads/$tbci_branch" | cut -f1) || true
+          if [ -z "$tbci_sha" ]; then
+            # Diagnose without printing the token
+            case "$TBCI_TOKEN" in github_pat_*) kind="fine-grained (github_pat_)" ;; ghp_*) kind="classic (ghp_)" ;; *) kind="unrecognised prefix" ;; esac
+            api() { curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $TBCI_TOKEN" -H "Accept: application/vnd.github+json" "$1"; }
+            echo "::error::Can't read tbci_customization. Token: length $raw_len as stored, ${#TBCI_TOKEN} after trimming whitespace, $kind." \
+              "GitHub API: /user -> $(api https://api.github.com/user)," \
+              "/repos/.../tbci_customization -> $(api https://api.github.com/repos/haashimrehan/tbci_customization)," \
+              "contents -> $(api https://api.github.com/repos/haashimrehan/tbci_customization/contents/README.md)" \
+              "(401 = token invalid/expired; 404 = token valid but no access to the repo or no Contents permission)"
+            exit 1
+          fi
           echo "tbci_customization $tbci_branch is at $tbci_sha"
 
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
