@@ -1,5 +1,9 @@
 [
   { "url": "https://github.com/frappe/erpnext", "branch": "v16.53.0" },
   { "url": "https://github.com/frappe/hrms", "branch": "version-16" },
-  { "url": "https://github.com/haashimrehan/erpnext-etsy", "branch": "main" }
+  { "url": "https://github.com/haashimrehan/erpnext-etsy", "branch": "main" },
+  {
+    "url": "https://github.com/haashimrehan/tbci_customization",
+    "branch": "main"
+  }
 ]

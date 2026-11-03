@@ -131,11 +131,19 @@ ARG FRAPPE_PATH=https://github.com/frappe/frappe
 ARG CACHE_BUST=""
 
 # Apply group permissions after app installation and cleanup, before the runtime COPY.
+# Optional secret git_token: read access to the private haashimrehan/tbci_customization repo.
+# It only reaches git through config env vars in this RUN, so it is never written to the image.
 RUN --mount=type=secret,id=apps_json,target=/opt/frappe/apps.json,uid=1000,gid=0 \
+  --mount=type=secret,id=git_token,target=/opt/frappe/git_token,uid=1000,gid=0 \
   : "${CACHE_BUST}" && \
   export APP_INSTALL_ARGS="" && \
   if [ -f /opt/frappe/apps.json ] && [ -s /opt/frappe/apps.json ]; then \
     export APP_INSTALL_ARGS="--apps_path=/opt/frappe/apps.json"; \
+  fi && \
+  if [ -s /opt/frappe/git_token ]; then \
+    export GIT_CONFIG_COUNT=1 \
+      GIT_CONFIG_KEY_0="url.https://x-access-token:$(cat /opt/frappe/git_token)@github.com/haashimrehan/tbci_customization.insteadOf" \
+      GIT_CONFIG_VALUE_0="https://github.com/haashimrehan/tbci_customization"; \
   fi && \
   bench init ${APP_INSTALL_ARGS}\
     --frappe-branch=${FRAPPE_BRANCH} \
